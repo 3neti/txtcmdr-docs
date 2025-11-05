@@ -48,6 +48,7 @@ nav:
       - Phone Normalization: phone-normalization.md
     - Scheduled Messaging: scheduled-messaging.md
     - Blacklist (No-Send List): blacklist-feature.md
+    - Bulk Import & Messaging: bulk-import.md
     - Group Management: group-management.md
     - Contact Management: contact-package.md
   - API Reference:
