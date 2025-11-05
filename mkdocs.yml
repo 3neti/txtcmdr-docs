@@ -49,6 +49,7 @@ nav:
     - Backend Services: backend-services.md
     - SMS Integration: sms-integration.md
     - Scheduled Messaging: scheduled-messaging.md
+    - Blacklist Feature: blacklist-feature.md
     - Phone Normalization: phone-normalization.md
     - Contact Package: contact-package.md
     - Interfaces & DTOs: interfaces-and-dtos.md
