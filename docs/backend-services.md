@@ -1038,6 +1038,61 @@ class CheckIfBlacklisted
 
 ---
 
+### OptOut (Public Endpoint)
+
+**Endpoint:** `POST /api/optout`
+
+**Location:** `app/Actions/Blacklist/OptOut.php`
+
+**Description:** Public endpoint allowing recipients to opt-out of SMS broadcasts. No authentication required.
+
+**Implementation:**
+```php
+namespace App\Actions\Blacklist;
+
+use App\Models\BlacklistedNumber;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Lorisleiva\Actions\Concerns\AsAction;
+
+class OptOut
+{
+    use AsAction;
+
+    public function handle(string $mobile): BlacklistedNumber
+    {
+        return BlacklistedNumber::add(
+            mobile: $mobile,
+            reason: 'opt-out',
+            addedBy: 'Self-service opt-out'
+        );
+    }
+
+    public function asController(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'mobile' => 'required|phone:PH',
+        ]);
+
+        $this->handle($validated['mobile']);
+
+        return response()->json([
+            'message' => 'You have been successfully opted out of SMS broadcasts',
+            'mobile' => $validated['mobile'],
+        ], 200);
+    }
+}
+```
+
+**Usage in SMS Messages:**
+```
+Your message content here. Reply STOP or visit https://txtcmdr.com/optout to unsubscribe.
+```
+
+**Note:** This action does NOT use `ActionRequest` since it must be publicly accessible without authentication.
+
+---
+
 ## Models
 
 ### BlacklistedNumber
@@ -2053,6 +2108,9 @@ Route::get('/blacklist', ListBlacklistedNumbers::class);
 Route::post('/blacklist', AddToBlacklist::class);
 Route::delete('/blacklist', RemoveFromBlacklist::class);
 Route::post('/blacklist/check', CheckIfBlacklisted::class);
+
+// Public opt-out endpoint (no authentication required)
+Route::post('/optout', OptOut::class);
 ```
 
 ---
