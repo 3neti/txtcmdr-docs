@@ -56,6 +56,7 @@ nav:
     - UI/UX Design: ui-ux-design.md
     - Frontend Scaffolding: frontend-scaffolding.md
     - Controller Scaffolding: controller-scaffolding.md
+    - Test Scaffolding: test-scaffolding.md
     - Wireframes: wireframes.md
 
 markdown_extensions:
