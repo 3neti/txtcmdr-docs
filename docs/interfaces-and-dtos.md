@@ -68,18 +68,23 @@ class Group extends Model
 
 **Location:** `app/Models/Contact.php`
 
-**Table:** `contacts`
+**Package:** Uses `lbhurtado/contact` package
+
+**Table:** `contacts` (provided by package migration)
 
 **Schema:**
 ```php
+// From lbhurtado/contact package migration
 Schema::create('contacts', function (Blueprint $table) {
     $table->id();
-    $table->string('mobile')->unique(); // +63XXXXXXXXXX format
-    $table->string('name')->nullable();
+    $table->string('mobile');  // formatForMobileDialingInCountry format
+    $table->string('country');
+    $table->string('bank_account')->nullable();
+    $table->schemalessAttributes('extra_attributes'); // JSON column
     $table->timestamps();
-    $table->softDeletes();
 });
 
+// Application-specific pivot table
 Schema::create('contact_group', function (Blueprint $table) {
     $table->id();
     $table->foreignId('contact_id')->constrained()->onDelete('cascade');
@@ -94,32 +99,64 @@ Schema::create('contact_group', function (Blueprint $table) {
 ```php
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
+use LBHurtado\Contact\Models\Contact as BaseContact;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
-use Illuminate\Database\Eloquent\SoftDeletes;
 
-class Contact extends Model
+class Contact extends BaseContact
 {
-    use SoftDeletes;
-
-    protected $fillable = [
-        'mobile',
-        'name',
-    ];
-
-    protected $casts = [
-        'created_at' => 'datetime',
-        'updated_at' => 'datetime',
-        'deleted_at' => 'datetime',
-    ];
-
+    /**
+     * Groups this contact belongs to
+     */
     public function groups(): BelongsToMany
     {
         return $this->belongsToMany(Group::class, 'contact_group')
             ->withTimestamps();
     }
+
+    /**
+     * SMS logs for this contact
+     */
+    public function smsLogs()
+    {
+        return $this->hasMany(SMSLog::class, 'mobile', 'mobile');
+    }
+
+    /**
+     * Get formatted mobile for SMS sending (E.164)
+     */
+    public function getE164MobileAttribute(): string
+    {
+        return phone($this->mobile, $this->country)->formatE164();
+    }
+
+    /**
+     * Set tags helper
+     */
+    public function setTags(array $tags): self
+    {
+        $this->extra_attributes->set('tags', $tags);
+        return $this;
+    }
+
+    /**
+     * Get tags helper
+     */
+    public function getTags(): array
+    {
+        return $this->extra_attributes->get('tags', []);
+    }
+
+    /**
+     * Check if contact has tag
+     */
+    public function hasTag(string $tag): bool
+    {
+        return in_array($tag, $this->getTags());
+    }
 }
 ```
+
+> **Note:** The Contact model extends `LBHurtado\Contact\Models\Contact` from the `lbhurtado/contact` package. This provides automatic phone normalization, schemaless attributes, bank account management, and meta data storage. See [Contact Package](contact-package.md) for complete documentation.
 
 ---
 
