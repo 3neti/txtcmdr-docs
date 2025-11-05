@@ -21,9 +21,18 @@ This document outlines the Laravel Actions, Controllers, and Services that power
   - [DeleteContactFromGroup](#deletecontactfromgroup)
   - [ListGroupContacts](#listgroupcontacts)
   - [ContactResource](#contactresource)
+- [Blacklist Management Actions](#blacklist-management-actions)
+  - [AddToBlacklist](#addtoblacklist)
+  - [RemoveFromBlacklist](#removefromblacklist)
+  - [ListBlacklistedNumbers](#listblacklistednumbers)
+  - [CheckIfBlacklisted](#checkifblacklisted)
+- [Models](#models)
+  - [BlacklistedNumber](#blacklistednumber)
 - [Supporting Services](#supporting-services)
   - [SMSService](#smsservice)
   - [ContactNormalizationService](#contactnormalizationservice)
+- [Job Middleware](#job-middleware)
+  - [CheckBlacklist](#checkblacklist)
 - [Jobs](#jobs)
   - [SendSMSJob](#sendsmsjob)
   - [BroadcastToGroupJob](#broadcasttogroupjob)
@@ -813,6 +822,335 @@ class ContactResource extends JsonResource
 
 ---
 
+## Blacklist Management Actions
+
+### AddToBlacklist
+
+**Endpoint:** `POST /api/blacklist`
+
+**Location:** `app/Actions/Blacklist/AddToBlacklist.php`
+
+**Description:** Add a phone number to the blacklist/no-send list.
+
+**Request:**
+```json
+{
+  "mobile": "0917 123 4567",
+  "reason": "User opted out"
+}
+```
+
+**Implementation:**
+```php
+namespace App\Actions\Blacklist;
+
+use App\Models\BlacklistedNumber;
+use Illuminate\Http\JsonResponse;
+use Lorisleiva\Actions\ActionRequest;
+use Lorisleiva\Actions\Concerns\AsAction;
+
+class AddToBlacklist
+{
+    use AsAction;
+
+    public function handle(
+        string $mobile,
+        ?string $reason = null,
+        ?string $addedBy = null
+    ): BlacklistedNumber {
+        return BlacklistedNumber::add($mobile, $reason, $addedBy);
+    }
+
+    public function rules(): array
+    {
+        return [
+            'mobile' => 'required|phone:PH',
+            'reason' => 'nullable|string|max:255',
+        ];
+    }
+
+    public function asController(ActionRequest $request): JsonResponse
+    {
+        $blacklisted = $this->handle(
+            $request->mobile,
+            $request->reason ?? 'Manual addition',
+            auth()->user()?->name
+        );
+
+        return response()->json([
+            'message' => 'Number added to blacklist',
+            'blacklisted' => $blacklisted,
+        ], 201);
+    }
+}
+```
+
+---
+
+### RemoveFromBlacklist
+
+**Endpoint:** `DELETE /api/blacklist`
+
+**Location:** `app/Actions/Blacklist/RemoveFromBlacklist.php`
+
+**Implementation:**
+```php
+namespace App\Actions\Blacklist;
+
+use App\Models\BlacklistedNumber;
+use Illuminate\Http\JsonResponse;
+use Lorisleiva\Actions\ActionRequest;
+use Lorisleiva\Actions\Concerns\AsAction;
+
+class RemoveFromBlacklist
+{
+    use AsAction;
+
+    public function handle(string $mobile): bool
+    {
+        return BlacklistedNumber::remove($mobile);
+    }
+
+    public function rules(): array
+    {
+        return [
+            'mobile' => 'required|phone:PH',
+        ];
+    }
+
+    public function asController(ActionRequest $request): JsonResponse
+    {
+        $removed = $this->handle($request->mobile);
+
+        if (!$removed) {
+            return response()->json([
+                'message' => 'Number not found in blacklist',
+            ], 404);
+        }
+
+        return response()->json([
+            'message' => 'Number removed from blacklist',
+        ], 200);
+    }
+}
+```
+
+---
+
+### ListBlacklistedNumbers
+
+**Endpoint:** `GET /api/blacklist`
+
+**Location:** `app/Actions/Blacklist/ListBlacklistedNumbers.php`
+
+**Implementation:**
+```php
+namespace App\Actions\Blacklist;
+
+use App\Models\BlacklistedNumber;
+use Illuminate\Http\JsonResponse;
+use Lorisleiva\Actions\ActionRequest;
+use Lorisleiva\Actions\Concerns\AsAction;
+
+class ListBlacklistedNumbers
+{
+    use AsAction;
+
+    public function handle(?string $search = null, ?string $reason = null)
+    {
+        $query = BlacklistedNumber::query();
+
+        if ($search) {
+            $query->where('mobile', 'like', "%{$search}%");
+        }
+
+        if ($reason) {
+            $query->byReason($reason);
+        }
+
+        return $query->orderBy('blocked_at', 'desc')->paginate(50);
+    }
+
+    public function asController(ActionRequest $request): JsonResponse
+    {
+        $blacklisted = $this->handle(
+            $request->search,
+            $request->reason
+        );
+
+        return response()->json($blacklisted);
+    }
+}
+```
+
+---
+
+### CheckIfBlacklisted
+
+**Endpoint:** `POST /api/blacklist/check`
+
+**Location:** `app/Actions/Blacklist/CheckIfBlacklisted.php`
+
+**Implementation:**
+```php
+namespace App\Actions\Blacklist;
+
+use App\Models\BlacklistedNumber;
+use Illuminate\Http\JsonResponse;
+use Lorisleiva\Actions\ActionRequest;
+use Lorisleiva\Actions\Concerns\AsAction;
+
+class CheckIfBlacklisted
+{
+    use AsAction;
+
+    public function handle(string $mobile): array
+    {
+        $isBlacklisted = BlacklistedNumber::isBlacklisted($mobile);
+        
+        $record = null;
+        if ($isBlacklisted) {
+            $record = BlacklistedNumber::where('mobile', $mobile)->first();
+        }
+
+        return [
+            'is_blacklisted' => $isBlacklisted,
+            'mobile' => $mobile,
+            'record' => $record,
+        ];
+    }
+
+    public function rules(): array
+    {
+        return [
+            'mobile' => 'required|phone:PH',
+        ];
+    }
+
+    public function asController(ActionRequest $request): JsonResponse
+    {
+        $result = $this->handle($request->mobile);
+
+        return response()->json($result);
+    }
+}
+```
+
+---
+
+## Models
+
+### BlacklistedNumber
+
+**Location:** `app/Models/BlacklistedNumber.php`
+
+**Description:** Model for managing the blacklist/no-send list.
+
+**Database Schema:**
+```php
+Schema::create('blacklisted_numbers', function (Blueprint $table) {
+    $table->id();
+    $table->string('mobile')->unique(); // E.164 format
+    $table->string('reason')->nullable();
+    $table->string('added_by')->nullable();
+    $table->timestamp('blocked_at')->useCurrent();
+    $table->timestamps();
+    
+    $table->index('mobile');
+});
+```
+
+**Implementation:**
+```php
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Propaganistas\LaravelPhone\PhoneNumber;
+
+class BlacklistedNumber extends Model
+{
+    protected $fillable = [
+        'mobile',
+        'reason',
+        'added_by',
+        'blocked_at',
+    ];
+
+    protected $casts = [
+        'blocked_at' => 'datetime',
+    ];
+
+    /**
+     * Check if a phone number is blacklisted
+     */
+    public static function isBlacklisted(string $mobile): bool
+    {
+        try {
+            $phone = new PhoneNumber($mobile, 'PH');
+            $normalized = $phone->formatE164();
+        } catch (\Exception $e) {
+            return false;
+        }
+
+        return self::where('mobile', $normalized)->exists();
+    }
+
+    /**
+     * Add a number to blacklist
+     */
+    public static function add(
+        string $mobile, 
+        ?string $reason = null, 
+        ?string $addedBy = null
+    ): self {
+        $phone = new PhoneNumber($mobile, 'PH');
+        $normalized = $phone->formatE164();
+
+        return self::firstOrCreate(
+            ['mobile' => $normalized],
+            [
+                'reason' => $reason ?? 'Manual addition',
+                'added_by' => $addedBy,
+                'blocked_at' => now(),
+            ]
+        );
+    }
+
+    /**
+     * Remove a number from blacklist
+     */
+    public static function remove(string $mobile): bool
+    {
+        try {
+            $phone = new PhoneNumber($mobile, 'PH');
+            $normalized = $phone->formatE164();
+            
+            return self::where('mobile', $normalized)->delete() > 0;
+        } catch (\Exception $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Scope: Recent blacklisted numbers
+     */
+    public function scopeRecent($query, int $days = 30)
+    {
+        return $query->where('blocked_at', '>=', now()->subDays($days));
+    }
+
+    /**
+     * Scope: By reason
+     */
+    public function scopeByReason($query, string $reason)
+    {
+        return $query->where('reason', $reason);
+    }
+}
+```
+
+---
+
 ## Supporting Services
 
 ### SMSService
@@ -932,6 +1270,66 @@ class ContactNormalizationService
 
 ---
 
+## Job Middleware
+
+### CheckBlacklist
+
+**Location:** `app/Jobs/Middleware/CheckBlacklist.php`
+
+**Description:** Job middleware that intercepts SMS jobs and checks if the recipient's phone number is blacklisted.
+
+**Architecture:** Applied to `SendSMSJob` via the `middleware()` method. Automatically cascades to all jobs that dispatch `SendSMSJob`.
+
+**Implementation:**
+```php
+namespace App\Jobs\Middleware;
+
+use App\Models\BlacklistedNumber;
+use Illuminate\Support\Facades\Log;
+
+class CheckBlacklist
+{
+    /**
+     * Process the queued job
+     */
+    public function handle(object $job, callable $next): void
+    {
+        // Only check jobs that have a 'mobile' property
+        if (!property_exists($job, 'mobile')) {
+            $next($job);
+            return;
+        }
+
+        $mobile = $job->mobile;
+
+        // Check if number is blacklisted
+        if (BlacklistedNumber::isBlacklisted($mobile)) {
+            Log::warning('SMS blocked - number is blacklisted', [
+                'mobile' => $mobile,
+                'job' => get_class($job),
+                'message' => property_exists($job, 'message') ? substr($job->message, 0, 50) : null,
+            ]);
+
+            // Mark job as handled (don't retry)
+            $job->delete();
+            return;
+        }
+
+        // Number is not blacklisted, proceed with job
+        $next($job);
+    }
+}
+```
+
+**How It Works:**
+1. Job is dispatched (e.g., `SendSMSJob::dispatch($mobile, $message, $senderId)`)
+2. Middleware intercepts before `handle()` executes
+3. Checks if `$mobile` is in `blacklisted_numbers` table
+4. If blacklisted: Deletes job, logs warning, returns
+5. If not blacklisted: Proceeds to job's `handle()` method
+
+---
+
 ## Jobs
 
 ### SendSMSJob
@@ -953,6 +1351,7 @@ class ContactNormalizationService
 ```php
 namespace App\Jobs;
 
+use App\Jobs\Middleware\CheckBlacklist;
 use App\Services\SMSService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -960,7 +1359,6 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
-use LBHurtado\SMS\Facades\SMS;
 
 class SendSMSJob implements ShouldQueue
 {
@@ -974,6 +1372,14 @@ class SendSMSJob implements ShouldQueue
         public string $message,
         public string $senderId
     ) {}
+
+    /**
+     * Get the middleware the job should pass through
+     */
+    public function middleware(): array
+    {
+        return [new CheckBlacklist];
+    }
 
     public function handle(SMSService $smsService): void
     {
@@ -1007,6 +1413,8 @@ class SendSMSJob implements ShouldQueue
     }
 }
 ```
+
+> **Note:** The `CheckBlacklist` middleware automatically applies to all `SendSMSJob` dispatches, including those from `BroadcastToGroupJob` and `ProcessScheduledMessage`.
 
 **Usage:**
 ```php
@@ -1639,6 +2047,12 @@ Route::get('/groups/{id}/contacts', ListGroupContacts::class);
 Route::post('/groups/{id}/contacts', AddContactToGroup::class);
 Route::put('/groups/{group_id}/contacts/{contact_id}', UpdateContactInGroup::class);
 Route::delete('/groups/{group_id}/contacts/{contact_id}', DeleteContactFromGroup::class);
+
+// Blacklist Management
+Route::get('/blacklist', ListBlacklistedNumbers::class);
+Route::post('/blacklist', AddToBlacklist::class);
+Route::delete('/blacklist', RemoveFromBlacklist::class);
+Route::post('/blacklist/check', CheckIfBlacklisted::class);
 ```
 
 ---

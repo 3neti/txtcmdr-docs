@@ -51,6 +51,11 @@ function createScheduledMessage(array $attributes = [])
 {
     return \App\Models\ScheduledMessage::factory()->create($attributes);
 }
+
+function createBlacklistedNumber(array $attributes = [])
+{
+    return \App\Models\BlacklistedNumber::factory()->create($attributes);
+}
 ```
 
 ### `phpunit.xml` (or `pest.xml`)
@@ -269,6 +274,57 @@ class ScheduledMessageFactory extends Factory
 }
 ```
 
+### `database/factories/BlacklistedNumberFactory.php`
+
+```php
+namespace Database\Factories;
+
+use App\Models\BlacklistedNumber;
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Propaganistas\LaravelPhone\PhoneNumber;
+
+class BlacklistedNumberFactory extends Factory
+{
+    protected $model = BlacklistedNumber::class;
+
+    public function definition(): array
+    {
+        $mobile = '0917' . fake()->numerify('#######');
+        $phone = new PhoneNumber($mobile, 'PH');
+
+        return [
+            'mobile' => $phone->formatE164(),
+            'reason' => fake()->randomElement(['opt-out', 'complaint', 'invalid', 'manual']),
+            'added_by' => fake()->name(),
+            'blocked_at' => now(),
+        ];
+    }
+
+    public function optOut(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'reason' => 'opt-out',
+        ]);
+    }
+
+    public function complaint(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'reason' => 'complaint',
+        ]);
+    }
+
+    public function invalid(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'reason' => 'invalid',
+        ]);
+    }
+}
+```
+
+---
+
 ### `database/factories/SenderIDFactory.php`
 
 ```php
@@ -389,6 +445,84 @@ it('can count contacts in a group', function () {
     expect($group->contacts()->count())->toBe(10);
 });
 ```
+
+### `tests/Unit/Models/BlacklistedNumberTest.php`
+
+```php
+use App\Models\BlacklistedNumber;
+
+it('checks if a number is blacklisted', function () {
+    $mobile = '+639171234567';
+    
+    expect(BlacklistedNumber::isBlacklisted($mobile))->toBeFalse();
+    
+    BlacklistedNumber::factory()->create(['mobile' => $mobile]);
+    
+    expect(BlacklistedNumber::isBlacklisted($mobile))->toBeTrue();
+});
+
+it('normalizes phone numbers when checking', function () {
+    BlacklistedNumber::factory()->create(['mobile' => '+639171234567']);
+    
+    expect(BlacklistedNumber::isBlacklisted('0917 123 4567'))->toBeTrue()
+        ->and(BlacklistedNumber::isBlacklisted('09171234567'))->toBeTrue()
+        ->and(BlacklistedNumber::isBlacklisted('+639171234567'))->toBeTrue();
+});
+
+it('adds a number to blacklist', function () {
+    $mobile = '0917 123 4567';
+    
+    $blacklisted = BlacklistedNumber::add($mobile, 'Test reason', 'Test User');
+    
+    expect($blacklisted->mobile)->toBe('+639171234567')
+        ->and($blacklisted->reason)->toBe('Test reason')
+        ->and($blacklisted->added_by)->toBe('Test User');
+});
+
+it('prevents duplicate blacklist entries', function () {
+    $mobile = '+639171234567';
+    
+    BlacklistedNumber::add($mobile, 'First reason');
+    BlacklistedNumber::add($mobile, 'Second reason'); // Should not create duplicate
+    
+    expect(BlacklistedNumber::where('mobile', $mobile)->count())->toBe(1);
+});
+
+it('removes a number from blacklist', function () {
+    $mobile = '+639171234567';
+    BlacklistedNumber::factory()->create(['mobile' => $mobile]);
+    
+    expect(BlacklistedNumber::isBlacklisted($mobile))->toBeTrue();
+    
+    $removed = BlacklistedNumber::remove($mobile);
+    
+    expect($removed)->toBeTrue()
+        ->and(BlacklistedNumber::isBlacklisted($mobile))->toBeFalse();
+});
+
+it('scopes recent blacklisted numbers', function () {
+    BlacklistedNumber::factory()->create(['blocked_at' => now()->subDays(10)]);
+    BlacklistedNumber::factory()->create(['blocked_at' => now()->subDays(40)]);
+    
+    $recent = BlacklistedNumber::recent(30)->get();
+    
+    expect($recent)->toHaveCount(1);
+});
+
+it('scopes by reason', function () {
+    BlacklistedNumber::factory()->optOut()->create();
+    BlacklistedNumber::factory()->complaint()->create();
+    BlacklistedNumber::factory()->invalid()->create();
+    
+    $optOuts = BlacklistedNumber::byReason('opt-out')->get();
+    $complaints = BlacklistedNumber::byReason('complaint')->get();
+    
+    expect($optOuts)->toHaveCount(1)
+        ->and($complaints)->toHaveCount(1);
+});
+```
+
+---
 
 ### `tests/Unit/Models/ScheduledMessageTest.php`
 
@@ -627,6 +761,236 @@ it('validates unique group names', function () {
         ->assertJsonValidationErrors(['name']);
 });
 ```
+
+### `tests/Feature/Actions/Blacklist/AddToBlacklistTest.php`
+
+```php
+use App\Actions\Blacklist\AddToBlacklist;
+use App\Models\BlacklistedNumber;
+
+beforeEach(fn () => actingAsAdmin());
+
+it('adds a number to blacklist', function () {
+    $action = new AddToBlacklist();
+    
+    $blacklisted = $action->handle(
+        '0917 123 4567',
+        'User opted out',
+        'Admin User'
+    );
+    
+    expect($blacklisted)->toBeInstanceOf(BlacklistedNumber::class)
+        ->and($blacklisted->mobile)->toBe('+639171234567')
+        ->and($blacklisted->reason)->toBe('User opted out')
+        ->and($blacklisted->added_by)->toBe('Admin User');
+});
+
+it('can be invoked as controller', function () {
+    $response = $this->postJson('/api/blacklist', [
+        'mobile' => '0917 123 4567',
+        'reason' => 'User complaint',
+    ]);
+    
+    $response->assertStatus(201)
+        ->assertJson([
+            'message' => 'Number added to blacklist',
+        ]);
+    
+    $this->assertDatabaseHas('blacklisted_numbers', [
+        'mobile' => '+639171234567',
+        'reason' => 'User complaint',
+    ]);
+});
+
+it('validates phone number format', function () {
+    $response = $this->postJson('/api/blacklist', [
+        'mobile' => 'invalid-phone',
+        'reason' => 'Test',
+    ]);
+    
+    $response->assertStatus(422)
+        ->assertJsonValidationErrors(['mobile']);
+});
+
+it('prevents duplicate entries', function () {
+    BlacklistedNumber::factory()->create(['mobile' => '+639171234567']);
+    
+    $response = $this->postJson('/api/blacklist', [
+        'mobile' => '0917 123 4567',
+        'reason' => 'Duplicate test',
+    ]);
+    
+    $response->assertStatus(201); // Should still succeed
+    
+    expect(BlacklistedNumber::where('mobile', '+639171234567')->count())->toBe(1);
+});
+```
+
+---
+
+### `tests/Feature/Actions/Blacklist/RemoveFromBlacklistTest.php`
+
+```php
+use App\Actions\Blacklist\RemoveFromBlacklist;
+use App\Models\BlacklistedNumber;
+
+beforeEach(fn () => actingAsAdmin());
+
+it('removes a number from blacklist', function () {
+    $mobile = '+639171234567';
+    BlacklistedNumber::factory()->create(['mobile' => $mobile]);
+    
+    $action = new RemoveFromBlacklist();
+    $result = $action->handle($mobile);
+    
+    expect($result)->toBeTrue()
+        ->and(BlacklistedNumber::isBlacklisted($mobile))->toBeFalse();
+});
+
+it('returns false for non-existent numbers', function () {
+    $action = new RemoveFromBlacklist();
+    $result = $action->handle('+639171234567');
+    
+    expect($result)->toBeFalse();
+});
+
+it('can be invoked as controller', function () {
+    $mobile = '+639171234567';
+    BlacklistedNumber::factory()->create(['mobile' => $mobile]);
+    
+    $response = $this->deleteJson('/api/blacklist', [
+        'mobile' => '0917 123 4567',
+    ]);
+    
+    $response->assertStatus(200)
+        ->assertJson([
+            'message' => 'Number removed from blacklist',
+        ]);
+    
+    $this->assertDatabaseMissing('blacklisted_numbers', [
+        'mobile' => $mobile,
+    ]);
+});
+
+it('returns 404 for non-existent numbers via controller', function () {
+    $response = $this->deleteJson('/api/blacklist', [
+        'mobile' => '0917 123 4567',
+    ]);
+    
+    $response->assertStatus(404)
+        ->assertJson([
+            'message' => 'Number not found in blacklist',
+        ]);
+});
+```
+
+---
+
+### `tests/Feature/Actions/Blacklist/ListBlacklistedNumbersTest.php`
+
+```php
+use App\Actions\Blacklist\ListBlacklistedNumbers;
+use App\Models\BlacklistedNumber;
+
+beforeEach(fn () => actingAsAdmin());
+
+it('lists all blacklisted numbers', function () {
+    BlacklistedNumber::factory()->count(5)->create();
+    
+    $action = new ListBlacklistedNumbers();
+    $result = $action->handle();
+    
+    expect($result->total())->toBe(5);
+});
+
+it('filters by search term', function () {
+    BlacklistedNumber::factory()->create(['mobile' => '+639171234567']);
+    BlacklistedNumber::factory()->create(['mobile' => '+639189876543']);
+    
+    $action = new ListBlacklistedNumbers();
+    $result = $action->handle('0917');
+    
+    expect($result->total())->toBe(1);
+});
+
+it('filters by reason', function () {
+    BlacklistedNumber::factory()->optOut()->count(3)->create();
+    BlacklistedNumber::factory()->complaint()->count(2)->create();
+    
+    $action = new ListBlacklistedNumbers();
+    $result = $action->handle(null, 'opt-out');
+    
+    expect($result->total())->toBe(3);
+});
+
+it('can be invoked as controller', function () {
+    BlacklistedNumber::factory()->count(10)->create();
+    
+    $response = $this->getJson('/api/blacklist');
+    
+    $response->assertStatus(200)
+        ->assertJsonStructure([
+            'data',
+            'current_page',
+            'total',
+        ])
+        ->assertJsonCount(10, 'data');
+});
+```
+
+---
+
+### `tests/Feature/Actions/Blacklist/CheckIfBlacklistedTest.php`
+
+```php
+use App\Actions\Blacklist\CheckIfBlacklisted;
+use App\Models\BlacklistedNumber;
+
+beforeEach(fn () => actingAsAdmin());
+
+it('checks if number is blacklisted', function () {
+    $mobile = '+639171234567';
+    $blacklisted = BlacklistedNumber::factory()->create(['mobile' => $mobile]);
+    
+    $action = new CheckIfBlacklisted();
+    $result = $action->handle($mobile);
+    
+    expect($result['is_blacklisted'])->toBeTrue()
+        ->and($result['mobile'])->toBe($mobile)
+        ->and($result['record']->id)->toBe($blacklisted->id);
+});
+
+it('returns false for non-blacklisted numbers', function () {
+    $mobile = '+639171234567';
+    
+    $action = new CheckIfBlacklisted();
+    $result = $action->handle($mobile);
+    
+    expect($result['is_blacklisted'])->toBeFalse()
+        ->and($result['mobile'])->toBe($mobile)
+        ->and($result['record'])->toBeNull();
+});
+
+it('can be invoked as controller', function () {
+    $mobile = '+639171234567';
+    BlacklistedNumber::factory()->create(['mobile' => $mobile]);
+    
+    $response = $this->postJson('/api/blacklist/check', [
+        'mobile' => '0917 123 4567',
+    ]);
+    
+    $response->assertStatus(200)
+        ->assertJson([
+            'is_blacklisted' => true,
+            'mobile' => $mobile,
+        ])
+        ->assertJsonStructure([
+            'record' => ['id', 'mobile', 'reason'],
+        ]);
+});
+```
+
+---
 
 ### `tests/Feature/Actions/Contacts/AddContactToGroupTest.php`
 
@@ -1104,6 +1468,86 @@ it('handles group broadcasting workflow', function () {
 });
 ```
 
+### `tests/Feature/Blacklist/BlacklistMiddlewareTest.php`
+
+```php
+use App\Jobs\SendSMSJob;
+use App\Models\BlacklistedNumber;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Log;
+
+beforeEach(function () {
+    Queue::fake();
+    Log::fake();
+});
+
+it('blocks SMS to blacklisted number', function () {
+    $mobile = '+639171234567';
+    BlacklistedNumber::factory()->create(['mobile' => $mobile]);
+    
+    SendSMSJob::dispatch($mobile, 'Test message', 'TXTCMDR');
+    
+    // Job should be intercepted and not executed
+    Queue::assertNothingPushed();
+    
+    Log::assertLogged('warning', function ($message, $context) use ($mobile) {
+        return $context['mobile'] === $mobile && 
+               str_contains($message, 'SMS blocked - number is blacklisted');
+    });
+});
+
+it('allows SMS to non-blacklisted number', function () {
+    $mobile = '+639171234567';
+    
+    SendSMSJob::dispatch($mobile, 'Test message', 'TXTCMDR');
+    
+    Queue::assertPushed(SendSMSJob::class, function ($job) use ($mobile) {
+        return $job->mobile === $mobile;
+    });
+});
+
+it('blocks group broadcast to blacklisted numbers', function () {
+    $group = createGroup();
+    
+    $contact1 = createContact(['mobile' => '09171234567']);
+    $contact2 = createContact(['mobile' => '09189876543']);
+    
+    $group->contacts()->attach([$contact1->id, $contact2->id]);
+    
+    // Blacklist one number
+    BlacklistedNumber::factory()->create(['mobile' => $contact1->e164_mobile]);
+    
+    BroadcastToGroupJob::dispatch($group->id, 'Test message', 'TXTCMDR');
+    
+    // Should only dispatch for non-blacklisted number
+    Queue::assertPushed(SendSMSJob::class, 1);
+    
+    Queue::assertPushed(SendSMSJob::class, function ($job) use ($contact2) {
+        return $job->mobile === $contact2->e164_mobile;
+    });
+});
+
+it('handles middleware for jobs without mobile property', function () {
+    // Create a job without mobile property - should pass through
+    $job = new class implements \Illuminate\Contracts\Queue\ShouldQueue {
+        use \Illuminate\Foundation\Bus\Dispatchable;
+        use \Illuminate\Queue\InteractsWithQueue;
+        use \Illuminate\Queue\SerializesModels;
+        
+        public function handle() {
+            // Do nothing
+        }
+    };
+    
+    dispatch($job);
+    
+    // Should not cause any errors
+    expect(true)->toBeTrue();
+});
+```
+
+---
+
 ### `tests/Feature/Contact/ContactManagementTest.php`
 
 ```php
@@ -1200,10 +1644,15 @@ tests/
 │   │   │   ├── CreateGroupTest.php
 │   │   │   ├── UpdateGroupTest.php
 │   │   │   └── DeleteGroupTest.php
-│   │   └── Contacts/
-│   │       ├── AddContactToGroupTest.php
-│   │       ├── UpdateContactInGroupTest.php
-│   │       └── DeleteContactFromGroupTest.php
+│   │   ├── Contacts/
+│   │   │   ├── AddContactToGroupTest.php
+│   │   │   ├── UpdateContactInGroupTest.php
+│   │   │   └── DeleteContactFromGroupTest.php
+│   │   └── Blacklist/
+│   │       ├── AddToBlacklistTest.php
+│   │       ├── RemoveFromBlacklistTest.php
+│   │       ├── ListBlacklistedNumbersTest.php
+│   │       └── CheckIfBlacklistedTest.php
 │   ├── Controllers/
 │   │   ├── DashboardControllerTest.php
 │   │   ├── Auth/
@@ -1215,13 +1664,16 @@ tests/
 │   │   └── AdminUserSeederTest.php
 │   ├── SMS/
 │   │   └── SMSWorkflowTest.php
-│   └── Contact/
-│       └── ContactManagementTest.php
+│   ├── Contact/
+│   │   └── ContactManagementTest.php
+│   └── Blacklist/
+│       └── BlacklistMiddlewareTest.php
 ├── Unit/
 │   ├── Models/
 │   │   ├── ContactTest.php
 │   │   ├── GroupTest.php
-│   │   └── ScheduledMessageTest.php
+│   │   ├── ScheduledMessageTest.php
+│   │   └── BlacklistedNumberTest.php
 │   └── Services/
 │       └── SMSServiceTest.php
 └── Pest.php
