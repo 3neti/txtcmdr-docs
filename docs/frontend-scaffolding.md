@@ -199,6 +199,74 @@ export interface ScheduleSMSResponse {
   message: string
 }
 
+---
+
+## API Client {#api-client}
+
+### `resources/js/lib/api.ts`
+
+Centralized API client using Axios for making HTTP requests to the backend.
+
+```typescript
+import axios, { AxiosInstance } from 'axios'
+import { SendSMSRequest, SendSMSResponse, ScheduleSMSRequest } from '@/types/api'
+
+class APIClient {
+  private client: AxiosInstance
+
+  constructor() {
+    this.client = axios.create({
+      baseURL: '/api',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+    })
+
+    // Add auth token from meta tag
+    const token = document.head.querySelector('meta[name="api-token"]')?.getAttribute('content')
+    if (token) {
+      this.client.defaults.headers.common['Authorization'] = `Bearer ${token}`
+    }
+  }
+
+  // SMS Methods
+  async sendSMS(data: SendSMSRequest): Promise<SendSMSResponse> {
+    const response = await this.client.post('/sms/send', data)
+    return response.data
+  }
+
+  async scheduleSMS(data: ScheduleSMSRequest) {
+    const response = await this.client.post('/sms/schedule', data)
+    return response.data
+  }
+
+  // Group Methods
+  async getGroups() {
+    const response = await this.client.get('/groups')
+    return response.data
+  }
+
+  async getGroup(id: number) {
+    const response = await this.client.get(`/groups/${id}`)
+    return response.data
+  }
+
+  // Contact Methods
+  async getContacts(params?: { search?: string; page?: number }) {
+    const response = await this.client.get('/contacts', { params })
+    return response.data
+  }
+
+  async addContactToGroup(contactId: number, groupId: number) {
+    const response = await this.client.post(`/contacts/${contactId}/groups`, { group_id: groupId })
+    return response.data
+  }
+}
+
+export const api = new APIClient()
+```
+
 export interface PaginatedResponse<T> {
   data: T[]
   links: {

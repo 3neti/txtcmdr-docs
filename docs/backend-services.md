@@ -9,7 +9,7 @@ This document outlines the Laravel Actions, Controllers, and Services that power
 - [SMS Broadcasting Actions](#sms-broadcasting-actions)
   - [SendToMultipleRecipients](#sendtomultiplerecipients)
   - [SendToMultipleGroups](#sendtomultiplegroups)
-- [Group Management Actions](#group-management-actions)
+- [Group Management Actions](#group-management)
   - [CreateGroup](#creategroup)
   - [ListGroups](#listgroups)
   - [GetGroup](#getgroup)
@@ -259,7 +259,7 @@ Route::post('/groups/send', SendToMultipleGroups::class);
 
 ---
 
-## Group Management Actions
+## Group Management Actions {#group-management}
 
 ### CreateGroup
 
